@@ -7,6 +7,7 @@ from dbt.adapters.rockset.relation import RocksetQuotePolicy, RocksetRelation
 from dbt.contracts.graph.manifest import Manifest
 from dbt.adapters.rockset.column import RocksetColumn
 from dbt.logger import GLOBAL_LOGGER as logger
+from rockset import Q, P, ParamDict
 
 import agate
 import dbt
@@ -355,6 +356,19 @@ class RocksetAdapter(BaseAdapter):
         sleep(3)
 
     @available.parse(lambda *a, **k: '')
+    def create_query_lambda(self, relation, sql, rockset_tag, query_parameters):
+        ws = relation.schema
+        view = relation.identifier
+        self._check_query_parameters(query_parameters)
+
+        if not self._does_query_lambda_exist(ws, view, rockset_tag):
+            self._create_query_lambda(
+                ws, view, sql, rockset_tag, query_parameters)
+        else:
+            self._update_query_lambda(
+                ws, view, sql, rockset_tag, query_parameters)
+
+    @available.parse(lambda *a, **k: '')
     def add_incremental_docs(self, relation, sql, unique_key):
         if unique_key and unique_key != '_id':
             raise dbt.exceptions.NotImplementedException(
@@ -600,6 +614,21 @@ class RocksetAdapter(BaseAdapter):
             else:
                 raise e
 
+    def _does_query_lambda_exist(self, ws, alias, rockset_tag):
+        rs = self._rs_client()
+        try:
+            rs.QueryLambda.retrieveByTag(
+                alias,
+                workspace=ws,
+                tag='latest'  # 'latest' tag will always exist
+            )
+            return True
+        except Exception as e:
+            if isinstance(e, rockset.exception.InputError) and e.code == NOT_FOUND:
+                return False
+            else:
+                raise e
+
     def _create_view(self, ws, view, sql):
         # Check if alias or collection exist with same name
         rs = self._rs_client()
@@ -616,6 +645,41 @@ class RocksetAdapter(BaseAdapter):
             'description': 'Created via dbt'
         }
         self._send_rs_request('POST', endpoint, body=body)
+
+    def _create_query_lambda(self, ws, view, sql, rockset_tag, query_parameters):
+        # Check if alias or collection exist with same name
+        rs = self._rs_client()
+        q = Q(sql)
+        for query_parameter in query_parameters:
+            q.P[query_parameter['name']] = query_parameter['value']
+        qlambda = rs.QueryLambda.create(
+            view,
+            workspace=ws,
+            query=q,
+            tag='latest'  # 'latest' tag will always exist
+        )
+
+    def _update_query_lambda(self, ws, view, sql, rockset_tag, query_parameters):
+        # Check if alias or collection exist with same name
+        rs = self._rs_client()
+
+        ql = rs.QueryLambda.retrieveByTag(
+            view,
+            workspace=ws,
+            tag='latest'
+        )
+        q = Q(sql)
+        for query_parameter in query_parameters:
+            q.P[query_parameter['name']] = query_parameter['value']
+        q1_new = ql.update(q)
+        q1_new.tag(rockset_tag)
+
+    def _check_query_parameters(self, query_parameters):
+        for index, query_parameter in enumerate(query_parameters):
+            for att in ['name', 'value']:
+                if att not in query_parameter:
+                    raise Exception(
+                        f'Parameter {index} in model {view} is missing the \'{att}\' attribute')
 
     # Delete the view and any views that depend on it (recursively)
     def _delete_view_recursively(self, ws, view):

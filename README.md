@@ -34,6 +34,8 @@ view | YES | Creates a [Rockset view](https://rockset.com/docs/views/#gatsby-foc
 ephemeral | Yes | Create a CTE.
 incremental | YES | Creates a [Rockset collection](https://docs.rockset.com/collections/) if it doesn't exist, and writes to it.
 
+In addition to this, there is a custom materialization named `query_lambda` which will create a [Rockset query lambda](https://rockset.com/docs/query-lambdas/).
+
 ### Testing Changes
 
 Before landing a commit, ensure that your changes pass tests by inserting an api key for any active Rockset org in `test/rockset.dbtspec`, and then running these two commands to install your changes in your local environment and run our test suite:
@@ -41,6 +43,8 @@ Before landing a commit, ensure that your changes pass tests by inserting an api
 pip3 install .
 pytest test/rockset.dbtspec
 ```
+
+Note: you must have the `pytest-dbt-adapter` package installed.
 
 ### Formatting
 
@@ -55,3 +59,30 @@ autopep8 --in-place --recursive .
 2. The `table` materialization is slower in Rockset than most due to Rockset's architecture as a low-latency, real-time database. Creating new collections requires provisioning hot storage to index and serve fresh data, which takes about a minute.
 3. Rockset queries have a two-minute timeout. Any model which runs a query that takes longer to execute than two minutes will fail.
 
+### Query Lambdas
+The `query_lambda` materialization will create or update a [query lambda](https://rockset.com/docs/query-lambdas/). Like other model types, these will be created in the Rockset workspace defined by the dbt target.
+
+To use it, simply add a model config parameter `materialized="query_lambda"`.
+
+Other parameters are:
+- `rockset_tag`, determines the [tag](https://rockset.com/docs/query-lambdas-version-control/#query-lambda-tags) applied. Defaults to the name of the dbt target. Note that the 'latest' tagged query lambda will always be targeted for new changes. Support for different query lambda instances per code branch or dbt target, will be achieved via workspaces.
+- `query_parameters`, an array of parameters for the query lambda. Each array element must contain a `name` for the parameter, and a `value` (a python bool,int,float or string).
+
+Example model:
+
+```
+{{ config(
+    materialized="query_lambda",
+    query_parameters=[
+        {'name':'name','value':'null'},
+        {'name':'limit','value':10},
+        {'name':'offset','value':0}
+    ]
+)}}
+
+select 
+  *
+from {{ ref('users') }}
+where (cast(:name as string) = 'null' or lower(name) like '%'||lower(:name)||'%')
+limit :limit offset :offset
+```
